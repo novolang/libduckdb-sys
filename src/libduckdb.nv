@@ -1,0 +1,362 @@
+// The C entry points of DuckDB, one novo-lang declaration each.
+//
+// A handle is an `Int`.  `duckdb_database`, `duckdb_connection`,
+// `duckdb_prepared_statement` and `duckdb_config` are each a pointer to
+// an opaque structure — the C header declares the structure and never
+// defines it — so a novo-lang caller carries the address the library
+// returned and never looks inside.  Zero is the null pointer.
+//
+// A handle is produced through an OUT-PARAMETER and destroyed through
+// the ADDRESS OF THE SLOT THAT HOLDS IT.  `duckdb_open` takes the
+// address of an eight-byte slot and writes the handle into it;
+// `duckdb_close` takes that same address, releases the database and
+// writes zero back.  The slot is what a caller keeps.  Every call in
+// between takes the handle itself, read out of the slot with
+// `ptr.read_word`.
+//
+// `duckdb_result` is the exception, and it is the one structure a
+// caller owns.  It is not a pointer to an opaque thing: it is a
+// six-word structure the caller reserves, hands to `duckdb_query` by
+// address, reads only through the accessors below, and releases with
+// `duckdb_destroy_result`.  The C header promises no size for it, so
+// the README says to reserve more than the six words it currently has.
+//
+// Every `duckdb_state` is 0 for success and 1 for failure.  A failed
+// query still fills the result, and `duckdb_result_error` is where the
+// message is; a result must be destroyed whether the query succeeded or
+// not.
+//
+// Reading a value is row at a time.  The chunk interface that replaced
+// it cannot be bound: its entry point, `duckdb_fetch_chunk`, takes a
+// `duckdb_result` BY VALUE, and the novo-lang foreign function
+// interface passes integers, floats and strings.  The README's
+// "What is not included" section says what that costs.
+
+// Open or create a database at `path`.
+//
+// `path` is a file name, or `":memory:"` for a database that lives
+// only in memory, or the empty string, which means the same.
+// `out_database` is the address of an eight-byte slot that receives the
+// database handle.  Answers 0 on success and 1 on failure, and a
+// failure writes nothing.
+pub @ffi(library = "duckdb", symbol = "duckdb_open")
+fn duckdb_open(path: Str, out_database: Int) -> Int [io, ffi]
+
+// Open or create a database with a configuration and an error message.
+//
+// `config` is a handle from `duckdb_create_config`, or 0 for the
+// defaults.  `out_error` is the address of a slot that receives the
+// address of a message on failure, which the caller releases with
+// `duckdb_free`; pass 0 to discard it.  Answers 0 on success and 1 on
+// failure.
+pub @ffi(library = "duckdb", symbol = "duckdb_open_ext")
+fn duckdb_open_ext(path: Str, out_database: Int, config: Int, out_error: Int) -> Int [io, ffi]
+
+// Close a database and release its handle.
+//
+// `database` is the ADDRESS OF THE SLOT `duckdb_open` wrote into, not
+// the handle in it.  The slot is set to zero, and closing a slot that
+// already holds zero does nothing.  Every connection must be
+// disconnected first.
+pub @ffi(library = "duckdb", symbol = "duckdb_close")
+fn duckdb_close(database: Int) [io, ffi]
+
+// Open a connection to a database.
+//
+// `database` is the handle, read out of the slot.  `out_connection` is
+// the address of a slot that receives the connection handle.  A
+// database may hold many connections, and each one has its own
+// transaction state.  Answers 0 on success and 1 on failure.
+pub @ffi(library = "duckdb", symbol = "duckdb_connect")
+fn duckdb_connect(database: Int, out_connection: Int) -> Int [io, ffi]
+
+// Close a connection and release its handle.
+//
+// `connection` is the ADDRESS OF THE SLOT, as it is for
+// `duckdb_close`, and the slot is set to zero.
+pub @ffi(library = "duckdb", symbol = "duckdb_disconnect")
+fn duckdb_disconnect(connection: Int) [io, ffi]
+
+// Interrupt the query running on a connection.
+//
+// The running query fails with an error rather than returning rows.
+// Calling this when nothing is running does nothing.
+pub @ffi(library = "duckdb", symbol = "duckdb_interrupt")
+fn duckdb_interrupt(connection: Int) [io, ffi]
+
+// Get the version of the library as text.
+//
+// The answer is the address of a static string such as `"v1.1.3"`.
+pub @ffi(library = "duckdb", symbol = "duckdb_library_version")
+fn duckdb_library_version() -> Int [ffi]
+
+// Create a configuration holding the default settings.
+//
+// `out_config` is the address of a slot that receives the handle.
+// Answers 0 on success and 1 on failure.  Release it with
+// `duckdb_destroy_config` whether or not it reaches `duckdb_open_ext`.
+pub @ffi(library = "duckdb", symbol = "duckdb_create_config")
+fn duckdb_create_config(out_config: Int) -> Int [ffi]
+
+// Get how many configuration settings the library has.
+//
+// The settings are indexed from 0 to one below this number, and
+// `duckdb_get_config_flag` names each.
+pub @ffi(library = "duckdb", symbol = "duckdb_config_count")
+fn duckdb_config_count() -> Int [ffi]
+
+// Get the name and the description of one configuration setting.
+//
+// `index` is below `duckdb_config_count()`.  `out_name` and
+// `out_description` are addresses of slots that receive the addresses
+// of two static strings.  Answers 0 on success and 1 when the index is
+// out of range.
+pub @ffi(library = "duckdb", symbol = "duckdb_get_config_flag")
+fn duckdb_get_config_flag(index: Int, out_name: Int, out_description: Int) -> Int [ffi]
+
+// Set one configuration setting.
+//
+// `name` is a setting `duckdb_get_config_flag` names, such as
+// `"access_mode"` or `"threads"`, and `option` is its value as text.
+// Answers 0 on success and 1 when the name is unknown or the value
+// does not parse.
+pub @ffi(library = "duckdb", symbol = "duckdb_set_config")
+fn duckdb_set_config(config: Int, name: Str, option: Str) -> Int [ffi]
+
+// Release a configuration.
+//
+// `config` is the ADDRESS OF THE SLOT, and the slot is set to zero.
+pub @ffi(library = "duckdb", symbol = "duckdb_destroy_config")
+fn duckdb_destroy_config(config: Int) [ffi]
+
+// Run `query` on a connection and materialise its result.
+//
+// `out_result` is the address of a `duckdb_result` the caller
+// reserved: six eight-byte words in the current header, and the header
+// promises no size, so reserve more.  Answers 0 on success and 1 on
+// failure.  A failure fills the result too, with the message
+// `duckdb_result_error` reports, so the result must be destroyed
+// either way.
+//
+// The whole answer is computed and held in memory before this call
+// returns.
+pub @ffi(library = "duckdb", symbol = "duckdb_query")
+fn duckdb_query(connection: Int, query: Str, out_result: Int) -> Int [io, ffi]
+
+// Release everything a result holds.
+//
+// `result` is the address of the caller's `duckdb_result`.  The bytes
+// stay the caller's; what is released is the rows behind them.
+// Destroying the same result twice is allowed.
+pub @ffi(library = "duckdb", symbol = "duckdb_destroy_result")
+fn duckdb_destroy_result(result: Int) [io, ffi]
+
+// Get how many columns a result has.
+//
+// A statement that returns no rows, such as an `INSERT`, still has a
+// column: the count of rows it changed.
+pub @ffi(library = "duckdb", symbol = "duckdb_column_count")
+fn duckdb_column_count(result: Int) -> Int [ffi]
+
+// Get how many rows a result has.
+//
+// The C header marks this deprecated, and it is here because it is the
+// only count the row-at-a-time readers below can be driven by.
+pub @ffi(library = "duckdb", symbol = "duckdb_row_count")
+fn duckdb_row_count(result: Int) -> Int [ffi]
+
+// Get the name of column `col`.
+//
+// The answer is the address of a string the result owns, valid until
+// the result is destroyed.  An index out of range answers 0.
+pub @ffi(library = "duckdb", symbol = "duckdb_column_name")
+fn duckdb_column_name(result: Int, col: Int) -> Int [ffi]
+
+// Get the type of column `col`.
+//
+// The answer is a number from the `duckdb_type` enumeration: 1 is
+// BOOLEAN, 4 is INTEGER, 5 is BIGINT, 11 is DOUBLE and 17 is VARCHAR.
+// The README has the table.  An index out of range answers 0, which is
+// `DUCKDB_TYPE_INVALID`.
+pub @ffi(library = "duckdb", symbol = "duckdb_column_type")
+fn duckdb_column_type(result: Int, col: Int) -> Int [ffi]
+
+// Get how many rows a statement changed.
+//
+// This is the answer for an `INSERT`, an `UPDATE` or a `DELETE`. For a
+// `SELECT` it is 0.
+pub @ffi(library = "duckdb", symbol = "duckdb_rows_changed")
+fn duckdb_rows_changed(result: Int) -> Int [ffi]
+
+// Get the error message a failed query left in a result.
+//
+// The answer is the address of a string the result owns, or 0 when the
+// query succeeded.
+pub @ffi(library = "duckdb", symbol = "duckdb_result_error")
+fn duckdb_result_error(result: Int) -> Int [ffi]
+
+// Get the kind of error a failed query left in a result.
+//
+// The answer is a number from the `duckdb_error_type` enumeration,
+// which separates a syntax error from a constraint violation from an
+// interrupt.  A result with no error answers 0.
+pub @ffi(library = "duckdb", symbol = "duckdb_result_error_type")
+fn duckdb_result_error_type(result: Int) -> Int [ffi]
+
+// Ask whether the value at `col` and `row` is NULL.
+//
+// Answers a C `bool`: compare it with 0 rather than with 1.  Every
+// reader below answers a default value for a NULL, so this is the only
+// way to tell a NULL from a zero.
+pub @ffi(library = "duckdb", symbol = "duckdb_value_is_null")
+fn duckdb_value_is_null(result: Int, col: Int, row: Int) -> Int [ffi]
+
+// Read the value at `col` and `row` as a boolean.
+//
+// Answers a C `bool`: compare it with 0 rather than with 1.  A NULL
+// answers false.
+pub @ffi(library = "duckdb", symbol = "duckdb_value_boolean")
+fn duckdb_value_boolean(result: Int, col: Int, row: Int) -> Int [ffi]
+
+// Read the value at `col` and `row` as a 32-bit signed integer.
+//
+// The answer arrives in 32 bits, so write `as i32` before comparing it
+// with a negative number.  A NULL answers 0, and so does a value that
+// does not fit.
+pub @ffi(library = "duckdb", symbol = "duckdb_value_int32")
+fn duckdb_value_int32(result: Int, col: Int, row: Int) -> Int [ffi]
+
+// Read the value at `col` and `row` as a 64-bit signed integer.
+//
+// A NULL answers 0, and so does a value that does not fit.
+pub @ffi(library = "duckdb", symbol = "duckdb_value_int64")
+fn duckdb_value_int64(result: Int, col: Int, row: Int) -> Int [ffi]
+
+// Read the value at `col` and `row` as a 64-bit unsigned integer.
+//
+// The bits arrive as they are, so a value above the largest signed
+// 64-bit number arrives negative.  A NULL answers 0.
+pub @ffi(library = "duckdb", symbol = "duckdb_value_uint64")
+fn duckdb_value_uint64(result: Int, col: Int, row: Int) -> Int [ffi]
+
+// Read the value at `col` and `row` as a double.
+//
+// A `REAL` column is converted on the way out, so this reads both
+// floating-point widths.  A NULL answers 0.0.
+pub @ffi(library = "duckdb", symbol = "duckdb_value_double")
+fn duckdb_value_double(result: Int, col: Int, row: Int) -> Float [ffi]
+
+// Read the value at `col` and `row` as text.
+//
+// The answer is the address of a zero-terminated string DuckDB
+// allocated, and THE CALLER RELEASES IT with `duckdb_free` and not with
+// `ptr.free`.  Any column type is converted to its text form.  A NULL
+// answers 0.
+pub @ffi(library = "duckdb", symbol = "duckdb_value_varchar")
+fn duckdb_value_varchar(result: Int, col: Int, row: Int) -> Int [ffi]
+
+// Prepare `query` on a connection.
+//
+// `out_prepared_statement` is the address of a slot that receives the
+// handle.  The query may hold parameters written `?` for a positional
+// one or `$name` for a named one.  Answers 0 on success and 1 on
+// failure, and a failure still writes a handle, so that
+// `duckdb_prepare_error` has somewhere to read the message from.
+pub @ffi(library = "duckdb", symbol = "duckdb_prepare")
+fn duckdb_prepare(connection: Int, query: Str, out_prepared_statement: Int) -> Int [io, ffi]
+
+// Release a prepared statement.
+//
+// `prepared_statement` is the ADDRESS OF THE SLOT, and the slot is set
+// to zero.
+pub @ffi(library = "duckdb", symbol = "duckdb_destroy_prepare")
+fn duckdb_destroy_prepare(prepared_statement: Int) [ffi]
+
+// Get the error message a failed preparation left.
+//
+// `prepared_statement` is the handle.  The answer is the address of a
+// string the statement owns, or 0 when the preparation succeeded.
+pub @ffi(library = "duckdb", symbol = "duckdb_prepare_error")
+fn duckdb_prepare_error(prepared_statement: Int) -> Int [ffi]
+
+// Get how many parameters a prepared statement has.
+//
+// Parameters are numbered from 1.
+pub @ffi(library = "duckdb", symbol = "duckdb_nparams")
+fn duckdb_nparams(prepared_statement: Int) -> Int [ffi]
+
+// Get the name of parameter `index`.
+//
+// The answer is the address of a string DuckDB allocated, and THE
+// CALLER RELEASES IT with `duckdb_free`.  A positional parameter is
+// named by its number as text.
+pub @ffi(library = "duckdb", symbol = "duckdb_parameter_name")
+fn duckdb_parameter_name(prepared_statement: Int, index: Int) -> Int [ffi]
+
+// Get the type a prepared statement expects for parameter `param_idx`.
+//
+// The answer is a `duckdb_type` number, or 0 when the type could not
+// be determined, which is ordinary for a parameter the planner has no
+// information about.
+pub @ffi(library = "duckdb", symbol = "duckdb_param_type")
+fn duckdb_param_type(prepared_statement: Int, param_idx: Int) -> Int [ffi]
+
+// Bind a boolean to parameter `param_idx`.
+//
+// `val` is a C `bool`: pass 0 or 1.  Answers 0 on success and 1 when
+// the index is out of range.
+pub @ffi(library = "duckdb", symbol = "duckdb_bind_boolean")
+fn duckdb_bind_boolean(prepared_statement: Int, param_idx: Int, val: Int) -> Int [ffi]
+
+// Bind a 32-bit signed integer to parameter `param_idx`.
+pub @ffi(library = "duckdb", symbol = "duckdb_bind_int32")
+fn duckdb_bind_int32(prepared_statement: Int, param_idx: Int, val: Int) -> Int [ffi]
+
+// Bind a 64-bit signed integer to parameter `param_idx`.
+pub @ffi(library = "duckdb", symbol = "duckdb_bind_int64")
+fn duckdb_bind_int64(prepared_statement: Int, param_idx: Int, val: Int) -> Int [ffi]
+
+// Bind a double to parameter `param_idx`.
+pub @ffi(library = "duckdb", symbol = "duckdb_bind_double")
+fn duckdb_bind_double(prepared_statement: Int, param_idx: Int, val: Float) -> Int [ffi]
+
+// Bind text to parameter `param_idx`.
+//
+// The bytes are copied, so the caller's string need not outlive the
+// call.
+pub @ffi(library = "duckdb", symbol = "duckdb_bind_varchar")
+fn duckdb_bind_varchar(prepared_statement: Int, param_idx: Int, val: Str) -> Int [ffi]
+
+// Bind NULL to parameter `param_idx`.
+pub @ffi(library = "duckdb", symbol = "duckdb_bind_null")
+fn duckdb_bind_null(prepared_statement: Int, param_idx: Int) -> Int [ffi]
+
+// Forget every value bound to a prepared statement.
+//
+// The statement stays prepared and may be bound again.
+pub @ffi(library = "duckdb", symbol = "duckdb_clear_bindings")
+fn duckdb_clear_bindings(prepared_statement: Int) -> Int [ffi]
+
+// Run a prepared statement with the values bound to it.
+//
+// `out_result` is the address of a `duckdb_result` the caller
+// reserved, as it is for `duckdb_query`.  Answers 0 on success and 1
+// on failure, and the result must be destroyed either way.
+pub @ffi(library = "duckdb", symbol = "duckdb_execute_prepared")
+fn duckdb_execute_prepared(prepared_statement: Int, out_result: Int) -> Int [io, ffi]
+
+// Allocate `size` bytes through DuckDB's own allocator.
+//
+// Answers the address, or 0 when the allocation failed.
+pub @ffi(library = "duckdb", symbol = "duckdb_malloc")
+fn duckdb_malloc(size: Int) -> Int [ffi]
+
+// Release memory DuckDB allocated.
+//
+// This is the call for every string an entry point above answered —
+// `duckdb_value_varchar`, `duckdb_parameter_name`, the error from
+// `duckdb_open_ext` — and for a block from `duckdb_malloc`.  Releasing
+// the null address does nothing.  `ptr.free` is not the same allocator
+// and must not be used here.
+pub @ffi(library = "duckdb", symbol = "duckdb_free")
+fn duckdb_free(p: Int) [ffi]

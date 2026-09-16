@@ -1,0 +1,282 @@
+// API tests for the DuckDB C API bindings.
+//
+// Every test below calls into the C library, so the suite needs
+// libduckdb installed and linked.  `novo pkg build` type-checks the
+// declarations without it; `novo test` runs them and does not.
+//
+// DuckDB was not installed on the machine these tests were written on,
+// so the suite has never been linked.  Read every assertion as a
+// statement about the documented C API rather than as an observation.
+//
+// Every database below is `":memory:"`, so the suite reads and writes
+// no file and needs no privileges.
+
+use std.test
+use libduckdb
+
+// Room for a `duckdb_result`.  The current header lays it out as six
+// eight-byte words; the header promises no size, so this is generous.
+const RESULT_BYTES: Int = 128
+
+// The `duckdb_type` numbers this suite names.
+const TYPE_INTEGER: Int = 4
+const TYPE_VARCHAR: Int = 17
+
+@test
+fn test_the_library_reports_its_version() [io, ffi]
+    test.case("duckdb_library_version")
+    let version = libduckdb.duckdb_library_version()
+    test.assert(version != 0)
+    test.assert(str.len(ptr.read_str(version)) > 0)
+
+@test
+fn test_a_database_opens_and_a_connection_is_made() [io, ffi]
+    test.case("duckdb_open, duckdb_connect, duckdb_interrupt, duckdb_disconnect, duckdb_close")
+    // A handle arrives in a slot the caller owns, and the destroyer
+    // takes the slot rather than the handle.
+    let db_slot = ptr.alloc_word()
+    test.assert(libduckdb.duckdb_open(":memory:", db_slot) == 0)
+    let db = ptr.read_word(db_slot)
+    test.assert(db != 0)
+    let conn_slot = ptr.alloc_word()
+    test.assert(libduckdb.duckdb_connect(db, conn_slot) == 0)
+    test.assert(ptr.read_word(conn_slot) != 0)
+    // Interrupting a connection that is running nothing does nothing.
+    libduckdb.duckdb_interrupt(ptr.read_word(conn_slot))
+    libduckdb.duckdb_disconnect(conn_slot)
+    // The destroyer writes zero back into the slot.
+    test.assert(ptr.read_word(conn_slot) == 0)
+    libduckdb.duckdb_close(db_slot)
+    test.assert(ptr.read_word(db_slot) == 0)
+    ptr.free(conn_slot)
+    ptr.free(db_slot)
+
+@test
+fn test_a_configuration_names_its_settings_and_opens_a_database() [io, ffi]
+    test.case("duckdb_create_config, duckdb_get_config_flag, duckdb_set_config, duckdb_open_ext")
+    let config_slot = ptr.alloc_word()
+    test.assert(libduckdb.duckdb_create_config(config_slot) == 0)
+    let config = ptr.read_word(config_slot)
+    test.assert(config != 0)
+    // The settings are indexed, and every index below the count names
+    // a setting and describes it.
+    let count = libduckdb.duckdb_config_count()
+    test.assert(count > 0)
+    let name_slot = ptr.alloc_word()
+    let desc_slot = ptr.alloc_word()
+    test.assert(libduckdb.duckdb_get_config_flag(0, name_slot, desc_slot) == 0)
+    test.assert(str.len(ptr.read_str(ptr.read_word(name_slot))) > 0)
+    test.assert(str.len(ptr.read_str(ptr.read_word(desc_slot))) > 0)
+    // An index at the count is out of range.
+    test.assert(libduckdb.duckdb_get_config_flag(count, name_slot, desc_slot) == 1)
+    test.assert(libduckdb.duckdb_set_config(config, "threads", "1") == 0)
+    // A setting that does not exist is refused rather than ignored.
+    test.assert(libduckdb.duckdb_set_config(config, "not_a_setting", "1") == 1)
+    let db_slot = ptr.alloc_word()
+    let error_slot = ptr.alloc_word()
+    ptr.write_word(error_slot, 0)
+    test.assert(libduckdb.duckdb_open_ext(":memory:", db_slot, config, error_slot) == 0)
+    test.assert(ptr.read_word(db_slot) != 0)
+    // A successful open leaves no message behind.
+    test.assert(ptr.read_word(error_slot) == 0)
+    libduckdb.duckdb_close(db_slot)
+    libduckdb.duckdb_destroy_config(config_slot)
+    test.assert(ptr.read_word(config_slot) == 0)
+    ptr.free(error_slot)
+    ptr.free(db_slot)
+    ptr.free(desc_slot)
+    ptr.free(name_slot)
+    ptr.free(config_slot)
+
+@test
+fn test_a_query_answers_columns_rows_and_values() [io, ffi]
+    test.case("duckdb_query and the row-at-a-time readers")
+    let db_slot = ptr.alloc_word()
+    let conn_slot = ptr.alloc_word()
+    let _ = libduckdb.duckdb_open(":memory:", db_slot)
+    let _ = libduckdb.duckdb_connect(ptr.read_word(db_slot), conn_slot)
+    let conn = ptr.read_word(conn_slot)
+    // The result is the one structure the caller lays out.
+    let result = ptr.alloc(RESULT_BYTES)
+    test.assert(libduckdb.duckdb_query(
+        conn,
+        "SELECT 42 AS n, 'duck' AS word, 1.5 AS ratio, true AS flag, NULL AS nothing",
+        result) == 0)
+    test.assert(libduckdb.duckdb_column_count(result) == 5)
+    test.assert(libduckdb.duckdb_row_count(result) == 1)
+    test.assert(ptr.read_str(libduckdb.duckdb_column_name(result, 0)) == "n")
+    test.assert(libduckdb.duckdb_column_type(result, 0) == TYPE_INTEGER)
+    test.assert(libduckdb.duckdb_column_type(result, 1) == TYPE_VARCHAR)
+    // An index out of range is DUCKDB_TYPE_INVALID rather than an error.
+    test.assert(libduckdb.duckdb_column_type(result, 99) == 0)
+    test.assert(libduckdb.duckdb_value_int32(result, 0, 0) as i32 == 42)
+    test.assert(libduckdb.duckdb_value_int64(result, 0, 0) == 42)
+    test.assert(libduckdb.duckdb_value_double(result, 2, 0) == 1.5)
+    // A C `bool` is tested against 0, not against 1.
+    test.assert(libduckdb.duckdb_value_boolean(result, 3, 0) != 0)
+    test.assert(libduckdb.duckdb_value_is_null(result, 4, 0) != 0)
+    test.assert(libduckdb.duckdb_value_is_null(result, 0, 0) == 0)
+    // The text is DuckDB's to allocate and the caller's to release,
+    // through DuckDB's allocator and not through `ptr.free`.
+    let word = libduckdb.duckdb_value_varchar(result, 1, 0)
+    test.assert(ptr.read_str(word) == "duck")
+    libduckdb.duckdb_free(word)
+    // Every value reads as text, whatever the column type is.
+    let n_as_text = libduckdb.duckdb_value_varchar(result, 0, 0)
+    test.assert(ptr.read_str(n_as_text) == "42")
+    libduckdb.duckdb_free(n_as_text)
+    // A NULL answers the null address rather than an empty string.
+    test.assert(libduckdb.duckdb_value_varchar(result, 4, 0) == 0)
+    libduckdb.duckdb_destroy_result(result)
+    libduckdb.duckdb_disconnect(conn_slot)
+    libduckdb.duckdb_close(db_slot)
+    ptr.free(result)
+    ptr.free(conn_slot)
+    ptr.free(db_slot)
+
+@test
+fn test_an_unsigned_value_arrives_as_its_bits() [io, ffi]
+    test.case("duckdb_value_uint64")
+    let db_slot = ptr.alloc_word()
+    let conn_slot = ptr.alloc_word()
+    let _ = libduckdb.duckdb_open(":memory:", db_slot)
+    let _ = libduckdb.duckdb_connect(ptr.read_word(db_slot), conn_slot)
+    let result = ptr.alloc(RESULT_BYTES)
+    let _ = libduckdb.duckdb_query(ptr.read_word(conn_slot),
+                                   "SELECT 7::UBIGINT AS small, 18446744073709551615::UBIGINT AS big",
+                                   result)
+    test.assert(libduckdb.duckdb_value_uint64(result, 0, 0) == 7)
+    // The largest unsigned 64-bit value has every bit set, and the bits
+    // arrive as they are, so it reads as -1.
+    test.assert(libduckdb.duckdb_value_uint64(result, 1, 0) == -1)
+    libduckdb.duckdb_destroy_result(result)
+    libduckdb.duckdb_disconnect(conn_slot)
+    libduckdb.duckdb_close(db_slot)
+    ptr.free(result)
+    ptr.free(conn_slot)
+    ptr.free(db_slot)
+
+@test
+fn test_a_failed_query_fills_the_result_with_its_message() [io, ffi]
+    test.case("duckdb_result_error, duckdb_result_error_type")
+    let db_slot = ptr.alloc_word()
+    let conn_slot = ptr.alloc_word()
+    let _ = libduckdb.duckdb_open(":memory:", db_slot)
+    let _ = libduckdb.duckdb_connect(ptr.read_word(db_slot), conn_slot)
+    let result = ptr.alloc(RESULT_BYTES)
+    test.assert(libduckdb.duckdb_query(ptr.read_word(conn_slot), "SELECT FROM WHERE", result) == 1)
+    // A failure fills the result too, and the message is in it.
+    test.assert(str.len(ptr.read_str(libduckdb.duckdb_result_error(result))) > 0)
+    test.assert(libduckdb.duckdb_result_error_type(result) != 0)
+    // A failed result is destroyed exactly as a successful one is.
+    libduckdb.duckdb_destroy_result(result)
+    libduckdb.duckdb_disconnect(conn_slot)
+    libduckdb.duckdb_close(db_slot)
+    ptr.free(result)
+    ptr.free(conn_slot)
+    ptr.free(db_slot)
+
+@test
+fn test_an_insert_reports_the_rows_it_changed() [io, ffi]
+    test.case("duckdb_rows_changed")
+    let db_slot = ptr.alloc_word()
+    let conn_slot = ptr.alloc_word()
+    let _ = libduckdb.duckdb_open(":memory:", db_slot)
+    let _ = libduckdb.duckdb_connect(ptr.read_word(db_slot), conn_slot)
+    let conn = ptr.read_word(conn_slot)
+    let result = ptr.alloc(RESULT_BYTES)
+    let _ = libduckdb.duckdb_query(conn, "CREATE TABLE t (n INTEGER)", result)
+    libduckdb.duckdb_destroy_result(result)
+    test.assert(libduckdb.duckdb_query(conn, "INSERT INTO t VALUES (1), (2), (3)", result) == 0)
+    test.assert(libduckdb.duckdb_rows_changed(result) == 3)
+    libduckdb.duckdb_destroy_result(result)
+    // A SELECT changes no rows.
+    let _ = libduckdb.duckdb_query(conn, "SELECT * FROM t", result)
+    test.assert(libduckdb.duckdb_rows_changed(result) == 0)
+    test.assert(libduckdb.duckdb_row_count(result) == 3)
+    libduckdb.duckdb_destroy_result(result)
+    libduckdb.duckdb_disconnect(conn_slot)
+    libduckdb.duckdb_close(db_slot)
+    ptr.free(result)
+    ptr.free(conn_slot)
+    ptr.free(db_slot)
+
+@test
+fn test_a_prepared_statement_binds_and_runs() [io, ffi]
+    test.case("duckdb_prepare, the binds and duckdb_execute_prepared")
+    let db_slot = ptr.alloc_word()
+    let conn_slot = ptr.alloc_word()
+    let _ = libduckdb.duckdb_open(":memory:", db_slot)
+    let _ = libduckdb.duckdb_connect(ptr.read_word(db_slot), conn_slot)
+    let conn = ptr.read_word(conn_slot)
+    let stmt_slot = ptr.alloc_word()
+    test.assert(libduckdb.duckdb_prepare(conn, "SELECT ?, ?, ?, ?, ?, ?", stmt_slot) == 0)
+    let stmt = ptr.read_word(stmt_slot)
+    // Parameters are numbered from 1.
+    test.assert(libduckdb.duckdb_nparams(stmt) == 6)
+    let first = libduckdb.duckdb_parameter_name(stmt, 1)
+    test.assert(ptr.read_str(first) == "1")
+    libduckdb.duckdb_free(first)
+    // A parameter the planner knows nothing about has no type.
+    test.assert(libduckdb.duckdb_param_type(stmt, 1) >= 0)
+    test.assert(libduckdb.duckdb_bind_boolean(stmt, 1, 1) == 0)
+    test.assert(libduckdb.duckdb_bind_int32(stmt, 2, 42) == 0)
+    test.assert(libduckdb.duckdb_bind_int64(stmt, 3, 9000000000) == 0)
+    test.assert(libduckdb.duckdb_bind_double(stmt, 4, 1.5) == 0)
+    test.assert(libduckdb.duckdb_bind_varchar(stmt, 5, "duck") == 0)
+    test.assert(libduckdb.duckdb_bind_null(stmt, 6) == 0)
+    // An index above the count is refused.
+    test.assert(libduckdb.duckdb_bind_int64(stmt, 7, 1) == 1)
+    let result = ptr.alloc(RESULT_BYTES)
+    test.assert(libduckdb.duckdb_execute_prepared(stmt, result) == 0)
+    test.assert(libduckdb.duckdb_value_boolean(result, 0, 0) != 0)
+    test.assert(libduckdb.duckdb_value_int64(result, 2, 0) == 9000000000)
+    test.assert(libduckdb.duckdb_value_double(result, 3, 0) == 1.5)
+    let word = libduckdb.duckdb_value_varchar(result, 4, 0)
+    test.assert(ptr.read_str(word) == "duck")
+    libduckdb.duckdb_free(word)
+    test.assert(libduckdb.duckdb_value_is_null(result, 5, 0) != 0)
+    libduckdb.duckdb_destroy_result(result)
+    // Clearing leaves the statement prepared and ready to bind again.
+    test.assert(libduckdb.duckdb_clear_bindings(stmt) == 0)
+    test.assert(libduckdb.duckdb_bind_int32(stmt, 2, 7) == 0)
+    libduckdb.duckdb_destroy_prepare(stmt_slot)
+    test.assert(ptr.read_word(stmt_slot) == 0)
+    libduckdb.duckdb_disconnect(conn_slot)
+    libduckdb.duckdb_close(db_slot)
+    ptr.free(result)
+    ptr.free(stmt_slot)
+    ptr.free(conn_slot)
+    ptr.free(db_slot)
+
+@test
+fn test_a_bad_preparation_carries_its_message() [io, ffi]
+    test.case("duckdb_prepare_error")
+    let db_slot = ptr.alloc_word()
+    let conn_slot = ptr.alloc_word()
+    let _ = libduckdb.duckdb_open(":memory:", db_slot)
+    let _ = libduckdb.duckdb_connect(ptr.read_word(db_slot), conn_slot)
+    let stmt_slot = ptr.alloc_word()
+    // A failed preparation still writes a handle, so that the message
+    // has somewhere to be read from.
+    test.assert(libduckdb.duckdb_prepare(ptr.read_word(conn_slot), "SELECT FROM", stmt_slot) == 1)
+    let stmt = ptr.read_word(stmt_slot)
+    test.assert(stmt != 0)
+    test.assert(str.len(ptr.read_str(libduckdb.duckdb_prepare_error(stmt))) > 0)
+    libduckdb.duckdb_destroy_prepare(stmt_slot)
+    libduckdb.duckdb_disconnect(conn_slot)
+    libduckdb.duckdb_close(db_slot)
+    ptr.free(stmt_slot)
+    ptr.free(conn_slot)
+    ptr.free(db_slot)
+
+@test
+fn test_the_librarys_allocator_hands_out_bytes() [io, ffi]
+    test.case("duckdb_malloc, duckdb_free")
+    let block = libduckdb.duckdb_malloc(64)
+    test.assert(block != 0)
+    ptr.write_word(block, 7)
+    test.assert(ptr.read_word(block) == 7)
+    libduckdb.duckdb_free(block)
+    // Releasing the null address does nothing.
+    libduckdb.duckdb_free(0)
