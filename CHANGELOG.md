@@ -5,6 +5,10 @@ is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.1.1 — 2026-09-18
+
+The documentation and comments in plain prose; no declaration changed.
+
 ## 0.1.0 — 2026-09-16
 
 The first release: forty-four entry points of the DuckDB C API, one
@@ -27,34 +31,33 @@ The first release: forty-four entry points of the DuckDB C API, one
     count, names and types, the six binds, `duckdb_clear_bindings` and
     `duckdb_execute_prepared`.
   - Memory: `duckdb_malloc` and `duckdb_free`.
-- `tests/libduckdb_tests.nv` — nine tests over the signatures. Every
+- `tests/libduckdb_tests.nv` — ten tests over the entry points. Every
   database they open is `":memory:"`, so the suite reads and writes no
   file and needs no privileges.
 
 ### The handle discipline, which is this package's decision
 
-DuckDB's handles — `duckdb_database`, `duckdb_connection`,
-`duckdb_prepared_statement`, `duckdb_config` — are each a pointer to an
-opaque structure. That part is ordinary: a caller carries an address and
-never looks inside.
+`duckdb_database`, `duckdb_connection`, `duckdb_prepared_statement` and
+`duckdb_config` are each a pointer to an opaque structure. That part is
+ordinary. A caller carries an address and never looks inside.
 
 What is not ordinary is where the address lives. A handle is produced
-through an out-parameter and destroyed through **the address of the slot
-that holds it**: `duckdb_open` takes the address of an eight-byte slot
-and writes the handle into it, and `duckdb_close` takes that same
-address, releases the database and writes zero back. Every call in
-between takes the handle itself, read out with `ptr.read_word`. So a
-novo-lang caller keeps the slot, not the handle, for as long as the
-thing lives.
+through an out-parameter and destroyed through the address of the slot
+that holds it. `duckdb_open` takes the address of an eight-byte slot and
+writes the handle into it, and `duckdb_close` takes that same address,
+releases the database and writes zero back. Every call in between takes
+the handle itself, read out with `ptr.read_word`. A novo-lang caller
+therefore keeps the slot rather than the handle for as long as the thing
+lives.
 
 `duckdb_result` is different again, and it is the only structure the
-caller owns outright. It is not a pointer to an opaque thing: it is a
+caller owns outright. It is not a pointer to an opaque thing. It is a
 structure the caller reserves the bytes for, hands to `duckdb_query` by
 address, reads only through the accessors, and releases with
 `duckdb_destroy_result`. The current header lays it out as six
-eight-byte words, and **the C interface promises no size and offers no
-call that reports one**, so the README tells a caller to reserve more
-than the six words and never to read a field out of it by offset.
+eight-byte words. The C API promises no size for it and offers no call
+that reports one, so the README tells a caller to reserve more than the
+six words and never to read a field out of it by offset.
 
 ### The effect rows
 
@@ -63,22 +66,14 @@ is `[io, ffi]`. Reading a value out of a result that is already in
 memory, binding a value into a statement, and asking the library its
 version or its settings are `[ffi]`.
 
-### Not a `0.0.x` interface release
-
-An interface release is the shape whose every `pub fn` body is a
-`todo()`. Every `pub fn` here is an `@ffi` declaration with no body, so
-`novo pkg publish` reads the package as a release with bodies and
-refuses a `0.0.x` version for it. The first release of a bindings
-package is therefore `0.1.0`.
-
 ### Unverified
 
 DuckDB was not installed on the machine this package was written on.
-`novo pkg build` type-checks the declarations without it and is green;
+`novo pkg build` type-checks the declarations without it and is green.
 `novo test` stopped at `cannot find -lduckdb`, so the suite has never
 been linked and no assertion in it has ever been observed to hold. The
 declarations were checked against the DuckDB C API reference. Treat the
-whole package as unmeasured until someone runs it against a real
+whole package as unmeasured until someone runs it against an installed
 libduckdb.
 
 ### Named as missing
@@ -86,9 +81,9 @@ libduckdb.
 **The data chunk interface, and it is the largest omission in this
 package.** DuckDB's current way of reading a result is
 `duckdb_fetch_chunk`, which hands back a chunk of up to 2048 rows in
-columnar form. It takes a `duckdb_result` **by value**, and the
-novo-lang foreign function interface passes integers, floats and
-strings, so it cannot be declared. Nothing a chunk leads to can be
+columnar form. It takes a `duckdb_result` by value, and the novo-lang
+foreign function interface passes integers, floats and strings, so it
+cannot be declared. Nothing a chunk leads to can be
 reached without it: `duckdb_data_chunk_get_vector`,
 `duckdb_vector_get_data`, `duckdb_vector_get_validity` and
 `duckdb_validity_row_is_valid` are all absent although each of them
@@ -99,10 +94,9 @@ reason.
 
 That is why the value readers in this package are the ones the C header
 marks deprecated. `duckdb_value_int64` and its neighbours take the
-result **by address**, and after the by-value rule they are the only
-readers that do. The package binds them knowing they are deprecated,
-because the alternative is a package that can run a query and not read
-its answer.
+result by address, and they are the only readers that do. The package
+binds them knowing they are deprecated, because the alternative is a
+package that can run a query and not read its answer.
 
 **`duckdb_string_is_inlined` and the `duckdb_string_t` accessors.** They
 take a `duckdb_string_t` by value. A caller reaches them only through a

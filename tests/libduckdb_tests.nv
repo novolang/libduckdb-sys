@@ -1,12 +1,12 @@
-// API tests for the DuckDB C API bindings.
+// Ten tests over the entry points of the DuckDB C API.
 //
 // Every test below calls into the C library, so the suite needs
-// libduckdb installed and linked.  `novo pkg build` type-checks the
-// declarations without it; `novo test` runs them and does not.
+// libduckdb installed and linkable.  `novo pkg build` type-checks the
+// declarations without the library, and `novo test` links against it.
 //
-// DuckDB was not installed on the machine these tests were written on,
-// so the suite has never been linked.  Read every assertion as a
-// statement about the documented C API rather than as an observation.
+// The library was not installed where these tests were written, so the
+// suite has never been linked.  Read every assertion as a statement
+// about the documented C API rather than as an observation.
 //
 // Every database below is `":memory:"`, so the suite reads and writes
 // no file and needs no privileges.
@@ -15,7 +15,7 @@ use std.test
 use libduckdb
 
 // Room for a `duckdb_result`.  The current header lays it out as six
-// eight-byte words; the header promises no size, so this is generous.
+// eight-byte words, and it promises no size, so this reserves more.
 const RESULT_BYTES: Int = 128
 
 // The `duckdb_type` numbers this suite names.
@@ -109,7 +109,7 @@ fn test_a_query_answers_columns_rows_and_values() [io, ffi]
     test.assert(libduckdb.duckdb_column_type(result, 1) == TYPE_VARCHAR)
     // An index out of range is DUCKDB_TYPE_INVALID rather than an error.
     test.assert(libduckdb.duckdb_column_type(result, 99) == 0)
-    test.assert(libduckdb.duckdb_value_int32(result, 0, 0) as i32 == 42)
+    test.assert((libduckdb.duckdb_value_int32(result, 0, 0) as i32) == 42)
     test.assert(libduckdb.duckdb_value_int64(result, 0, 0) == 42)
     test.assert(libduckdb.duckdb_value_double(result, 2, 0) == 1.5)
     // A C `bool` is tested against 0, not against 1.

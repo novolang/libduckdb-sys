@@ -1,21 +1,21 @@
 # libduckdb-sys
 
 DuckDB is an in-process analytical database. It runs inside the program
-that uses it, like SQLite, and it answers analytical queries — scans,
-aggregations and joins over columns — the way a data warehouse does.
-It speaks SQL, it reads and writes its own file format, and it can query
-CSV and Parquet files where they lie. The C interface is documented in
+that uses it, as SQLite does. It answers analytical queries, which are
+scans, aggregations and joins over columns, the way a data warehouse
+does. It speaks SQL, it reads and writes its own file format, and it can
+query CSV and Parquet files where they lie. The C API is documented in
 the [DuckDB C API reference](https://duckdb.org/docs/stable/clients/c/overview).
-This package declares forty-four of that interface's entry points to
+This package declares forty-four of that API's entry points to
 novo-lang, one declaration each.
 
-**Status: a binding, not a port.** Every function in this package is a
-declaration of a function in libduckdb. The package contains no logic of
-its own, and it does nothing without the C library installed. The
-forty-four entry points are enough to open a database, connect to it,
-run a query or a prepared statement, and read the answer value by value;
-the section "What is not included" says what a program still cannot do
-with them alone, and why one of the omissions is larger than it looks.
+Every function here is a declaration of a function in libduckdb. The
+package contains no logic of its own, and it does nothing without the C
+library installed. The forty-four calls are enough to open a database,
+connect to it, run a query or a prepared statement, and read the answer
+value by value. The section "What is not included" says what a program
+cannot do with them alone, and the first item is the data chunk
+interface.
 
 ## What it is
 
@@ -26,18 +26,19 @@ A **connection** is one session against a database. It has its own
 transaction state, and a database may hold several.
 
 A **result** is the whole answer to a query, computed and held in memory
-before the call returns. A result is not a cursor: nothing is left to
+before the call returns. A result is not a cursor. Nothing is left to
 fetch, and the rows do not arrive as the query runs.
 
-A **prepared statement** is a query the server has parsed and planned,
-with places left for values. The places are written `?` and are numbered
-from 1. Binding a value into a place is not the same as writing it into
-the query text: a bound value is never parsed as SQL.
+A **prepared statement** is a query the library has parsed and planned,
+with places left for values. A place is written `?` for a positional
+parameter, or `$name` for a named one, and the positional places are
+numbered from 1. Binding a value into a place is not the same as writing
+it into the query text. A bound value is never parsed as SQL.
 
-A **handle** is the address of something the library owns: a database, a
-connection, a prepared statement, a configuration. The C header declares
-the structure behind each one and never defines it, so a program holds
-the address and cannot look inside.
+A **handle** is the address of something the library owns. A database, a
+connection, a prepared statement and a configuration are each held as
+one. The C header declares the structure behind each one and never
+defines it, so a program holds the address and cannot look inside.
 
 ## Install
 
@@ -102,8 +103,9 @@ fn main() [io, ffi]
 ```
 
 The example is fenced as an illustration rather than a compiled block
-because `novo doc` compiles the blocks in documentation comments and not
-the ones in this file. The same calls are in
+because `novo doc` compiles such a block by linking it against
+libduckdb, and that library is not installed on every machine which
+builds the documentation. The same calls are in
 `tests/libduckdb_tests.nv`.
 
 ## What the package contains
@@ -127,7 +129,7 @@ The six groups and their sizes:
 
 `duckdb_open` is for a database with the default settings.
 `duckdb_open_ext` is the same call with a configuration and an error
-message; use it when a setting matters, or when knowing why an open
+message. Use it when a setting matters, or when knowing why an open
 failed matters.
 
 `duckdb_query` is for a query with no values to supply. It parses,
@@ -165,17 +167,17 @@ the ones to use when the column type is known.
 3. **A `duckdb_result` is a structure the caller owns.** It is not a
    handle. `duckdb_query` is handed the address of bytes the caller
    reserved, and it writes the structure into them. The current header
-   lays it out as six eight-byte words, which is 48 bytes, and **the C
-   interface promises no size and offers no call that reports one**, so
-   reserve more than that — 128 bytes is what the test suite uses — and
-   never read a field out of it by offset. Every field is read through
-   an accessor: `duckdb_column_count`, `duckdb_row_count`,
-   `duckdb_result_error` and the value readers.
+   lays it out as six eight-byte words, which is 48 bytes. The C API
+   promises no size for it and offers no call that reports one, so
+   reserve more than 48 bytes. The test suite reserves 128. Never read
+   a field out of the structure by offset. Every field is read through
+   an accessor, which is `duckdb_column_count`, `duckdb_row_count`,
+   `duckdb_result_error` or one of the value readers.
 4. **A failed query fills the result too.** `duckdb_query` answers 1
    and still writes a result, because that is where the message is.
    Call `duckdb_destroy_result` whether the query succeeded or not.
 5. **A `duckdb_state` is 0 for success and 1 for failure.** There is no
-   third value, and there is no error code: the message is text.
+   third value, and there is no error code. The message is text.
 6. **A C `bool` is tested against 0.** `duckdb_value_is_null` and
    `duckdb_value_boolean` answer one byte widened to an `Int`. Write
    `!= 0`, not `== 1`.
@@ -192,17 +194,17 @@ the ones to use when the column type is known.
     That covers `duckdb_value_varchar`, `duckdb_parameter_name` and the
     error from `duckdb_open_ext`. `ptr.free` is a different allocator
     and must not be used on them. A string an accessor merely points at
-    — `duckdb_column_name`, `duckdb_result_error`,
-    `duckdb_prepare_error`, `duckdb_library_version` — belongs to the
-    result or to the library and is not released at all; it is valid
-    until the thing that owns it is destroyed.
+    belongs to the result or to the library and is not released at all.
+    `duckdb_column_name`, `duckdb_result_error`, `duckdb_prepare_error`
+    and `duckdb_library_version` answer such a string. It is valid until
+    the thing that owns it is destroyed.
 11. **Parameters are numbered from 1.** `duckdb_nparams` answers how
     many there are, and a bind above that number answers 1.
 12. **A failed preparation still writes a handle.** That is where
     `duckdb_prepare_error` reads the message from, and the handle is
     destroyed the same way a successful one is.
-13. **The column type numbers are numbers**, because the C header
-    spells them as an enumeration.
+13. **A column type is a number.** The C header spells the types as an
+    enumeration, and `duckdb_column_type` answers the number.
 
     | Type | Number |
     | --- | --- |
@@ -228,19 +230,19 @@ the ones to use when the column type is known.
 
 ## What is not included
 
-- **The data chunk interface, and this is the large one.** DuckDB's
-  current way of reading a result is `duckdb_fetch_chunk`, which hands
-  back a chunk of up to 2048 rows in columnar form, and it takes a
-  `duckdb_result` **by value**. The novo-lang foreign function interface
-  passes integers, floats and strings, so there is no way to call it,
-  and with it go `duckdb_data_chunk_get_vector`,
+- **The data chunk interface, which is the largest omission here.**
+  DuckDB's current way of reading a result is `duckdb_fetch_chunk`,
+  which hands back a chunk of up to 2048 rows in columnar form, and it
+  takes a `duckdb_result` by value. The novo-lang foreign function
+  interface passes integers, floats and strings, so there is no way to
+  call it. With it go `duckdb_data_chunk_get_vector`,
   `duckdb_vector_get_data`, `duckdb_vector_get_validity` and everything
   else a chunk leads to. `duckdb_result_chunk_count`,
   `duckdb_result_get_chunk`, `duckdb_result_is_streaming` and
   `duckdb_result_return_type` take a `duckdb_result` by value for the
   same reason. That is why the row-at-a-time readers in this package are
-  the ones the C header marks deprecated: they take the result **by
-  address**, and they are the only readers that do.
+  the ones the C header marks deprecated. Those readers take the result
+  by address, and they are the only readers that do.
 - **`duckdb_string_is_inlined` and the `duckdb_string_t` accessors.**
   They take a `duckdb_string_t` by value. A caller reaches them only
   through a vector, which is already absent.
@@ -259,7 +261,7 @@ the ones to use when the column type is known.
   inserting many rows, and it is left out of the first release.
 - **The extraction of multiple statements**,
   `duckdb_extract_statements`, and the pending and streaming result
-  interfaces.
+  interfaces. They are left out of the first release.
 - **Everything built on a C function pointer.** The replacement scans,
   the user-defined table functions, the user-defined scalar and
   aggregate functions, and the destructor callbacks a caller registers
@@ -273,9 +275,9 @@ the ones to use when the column type is known.
 
 ## Related packages
 
-There is no novo-lang port of DuckDB and there will not be one: an
-analytics engine is a query planner, an execution engine and a storage
-layer, not a file format someone can implement in an afternoon.
+There is no novo-lang port of DuckDB. An analytics engine is a query
+planner, an execution engine and a storage layer, and this package is
+how a novo-lang program reaches one.
 
 `sqlite-nv` and `libsqlite3-sys` are the row-store neighbours, for a
 program that reads and writes records one at a time. `parquet-nv` and
@@ -284,8 +286,8 @@ read the files DuckDB reads without running a database at all.
 
 ## Tests
 
-`tests/libduckdb_tests.nv` holds nine tests written against the
-signatures. They call the C library, so `novo test` needs libduckdb
+`tests/libduckdb_tests.nv` holds ten tests over the forty-four entry
+points. They call the C library, so `novo test` needs libduckdb
 installed and linkable:
 
 ```
@@ -295,40 +297,26 @@ novo test tests/libduckdb_tests.nv
 `novo pkg build` type-checks the declarations and needs nothing
 installed.
 
-**Unverified: the suite has never linked on the staging machine.**
-DuckDB was not installed where this package was written, so `novo test`
-stopped at `cannot find -lduckdb` and no assertion below has ever been
-observed to hold. Every assertion is written from the documented C API.
-Treat the package as unmeasured until someone runs it against a real
+The suite has never linked. DuckDB was not installed on the machine
+this package was written on, so `novo test` stopped at
+`cannot find -lduckdb` and no assertion below has ever been observed to
+hold. Every assertion is written from the documented C API. Treat the
+package as unmeasured until someone runs it against an installed
 libduckdb.
 
 Every database the suite opens is `":memory:"`, so it reads and writes
 no file and needs no privileges. The handle test asserts that a
 destroyer writes zero back into the slot it was given. The configuration
 test asserts that a setting which does not exist is refused rather than
-ignored. The query test reads one row as an integer, a double, a boolean,
-a NULL and text, and asserts that an integer reads as text too. The
-unsigned test asserts that the largest 64-bit value arrives as -1. The
-failure test asserts that a failed query still fills the result with its
-message. The prepared-statement test binds all six kinds, runs the
-statement, and asserts that a bind above the parameter count is refused.
-
-## Implementation status
-
-| Group | State |
-| --- | --- |
-| Database and connection | Complete. |
-| Configuration | Complete. |
-| Query and result | Complete for a materialised result. |
-| Reading a value | Complete for boolean, 32- and 64-bit integers, double and text. |
-| Prepared statements | Complete for the six binds above. |
-| Memory | Complete. |
-| The data chunk interface | Absent. Its entry point takes a result by value. |
-| Dates, timestamps, decimals, hugeints and blobs | Absent. They are passed by value. Read them as text. |
-| The appender | Absent. Left out of the first release. |
-| Streaming and pending results | Absent. |
-| User-defined functions and replacement scans | Absent. They take C function pointers. |
-| The Arrow interface | Absent. |
+ignored. The query test reads one row as an integer, a double, a
+boolean, a NULL and text, and asserts that an integer reads as text too.
+The unsigned test asserts that the largest unsigned 64-bit value arrives
+as -1. The failure test asserts that a failed query still fills the
+result with its message. The insert test asserts the count of rows a
+statement changed. The prepared-statement test binds all six kinds, runs
+the statement, and asserts that a bind above the parameter count is
+refused. The allocator test asserts that `duckdb_malloc` hands back
+usable bytes and that `duckdb_free` accepts the null address.
 
 ## Licence
 
