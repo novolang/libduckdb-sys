@@ -9,6 +9,17 @@ with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
 The documentation and comments in plain prose; no declaration changed.
 
+### Corrected against the DuckDB C API reference
+
+- DuckDB runs in the calling process, so a prepared statement is a
+  query the library has parsed and planned rather than a server.
+- A parameter place is written `?` for a positional parameter or
+  `$name` for a named one, and the positional places are numbered
+  from 1.
+- The result of an `INSERT` has one column, named `Count`, whose
+  single value is the number of rows the statement changed.
+- The suite holds ten tests, not nine.
+
 ## 0.1.0 — 2026-09-16
 
 The first release: forty-four entry points of the DuckDB C API, one
